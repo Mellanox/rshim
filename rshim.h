@@ -358,9 +358,6 @@ struct rshim_service {
 /* Global array to store RShim devices and names. */
 extern struct workqueue_struct *rshim_wq;
 
-/* Boot timeout value. */
-extern int rshim_boot_timeout;
-
 /* Common APIs. */
 
 /* Register/unregister backend. */
