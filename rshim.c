@@ -47,11 +47,20 @@ MODULE_PARM_DESC(backend_driver, "Rshim backend driver to use");
 
 static int rshim_keepalive_period = 300;
 module_param(rshim_keepalive_period, int, 0644);
-MODULE_PARM_DESC(rshim_keepalive_period, "keepalive period in milliseconds");
+MODULE_PARM_DESC(rshim_keepalive_period, "Keepalive period in milliseconds");
 
 static int rshim_sw_reset_skip;
 module_param(rshim_sw_reset_skip, int, 0444);
-MODULE_PARM_DESC(rshim_sw_reset_skip, "skip SW_RESET during booting");
+MODULE_PARM_DESC(rshim_sw_reset_skip, "Skip SW_RESET during booting");
+
+static int rshim_adv_cfg;
+module_param(rshim_adv_cfg, int, 0644);
+MODULE_PARM_DESC(rshim_adv_cfg, "Advanced configuration");
+
+int rshim_boot_timeout = 100;
+module_param(rshim_boot_timeout, int, 0644);
+MODULE_PARM_DESC(rshim_boot_timeout, "Boot timeout in seconds");
+EXPORT_SYMBOL(rshim_boot_timeout);
 
 #define RSH_KEEPALIVE_MAGIC_NUM 0x5089836482ULL
 
@@ -317,7 +326,8 @@ static ssize_t rshim_write_delayed(struct rshim_backend *bd, int devtype,
 	u64 word;
 	char pad_buf[sizeof(u64)] = { 0 };
 	int size_addr, size_mask, data_addr, max_size;
-	int retval, avail = 0, byte_cnt = 0, retry;
+	int retval, avail = 0, byte_cnt = 0;
+	unsigned long timeout, cur_time;
 
 	switch (devtype) {
 	case RSH_DEV_TYPE_NET:
@@ -349,6 +359,8 @@ static ssize_t rshim_write_delayed(struct rshim_backend *bd, int devtype,
 		return -EINVAL;
 	}
 
+	timeout = msecs_to_jiffies(rshim_boot_timeout * 1000);
+
 	while (byte_cnt < count) {
 		/* Check the boot cancel condition. */
 		if (devtype == RSH_DEV_TYPE_BOOT && !bd->boot_work_buf)
@@ -360,7 +372,7 @@ static ssize_t rshim_write_delayed(struct rshim_backend *bd, int devtype,
 			buf = (const char *)pad_buf;
 		}
 
-		retry = 0;
+		cur_time = jiffies + timeout;
 		while (avail <= 0) {
 			/* Calculate available space in words. */
 			retval = bd->read_rshim(bd, RSHIM_CHANNEL, size_addr,
@@ -373,13 +385,12 @@ static ssize_t rshim_write_delayed(struct rshim_backend *bd, int devtype,
 			if (avail > 0)
 				break;
 
-			/*
-			 * Retry 100s, or else return failure since the other
-			 * side seems not to be responding.
-			 */
-			if (++retry > 100000)
+			/* Return failure if the peer is not responding. */
+			if (time_after(jiffies, cur_time))
 				return -ETIMEDOUT;
+			mutex_unlock(&bd->mutex);
 			msleep(1);
+			mutex_lock(&bd->mutex);
 		}
 
 		word = *(u64 *)buf;
@@ -549,6 +560,10 @@ static ssize_t rshim_boot_write(struct file *file, const char *user_buffer,
 		} else if (retval == 0) {
 			/* Wait for some time instead of busy polling. */
 			msleep_interruptible(1);
+			if (signal_pending(current)) {
+				retval = -ERESTARTSYS;
+				break;
+			}
 			continue;
 		}
 		if (retval != buf_bytes)
@@ -791,7 +806,7 @@ int rshim_boot_open(struct file *file)
 	return 0;
 }
 
-/* FIFO common file operations routines */
+/* FIFO common routines */
 
 /*
  * Signal an error on the FIFO, and wake up anyone who might need to know
@@ -807,6 +822,145 @@ static void rshim_fifo_err(struct rshim_backend *bd, int err)
 		wake_up_interruptible_all(&bd->read_fifo[i].operable);
 		wake_up_interruptible_all(&bd->write_fifo[i].operable);
 	}
+}
+
+static int rshim_fifo_tx_avail(struct rshim_backend *bd)
+{
+	u64 word;
+	int ret, max_size, avail;
+
+	/* Get FIFO max size. */
+	ret = bd->read_rshim(bd, RSHIM_CHANNEL,
+				RSH_TM_HOST_TO_TILE_CTL, &word);
+	if (ret < 0) {
+		ERROR("read_rshim error %d", ret);
+		return ret;
+	}
+	max_size = (word >> RSH_TM_HOST_TO_TILE_CTL__MAX_ENTRIES_SHIFT)
+		   & RSH_TM_HOST_TO_TILE_CTL__MAX_ENTRIES_RMASK;
+
+	/* Calculate available size. */
+	ret = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_TM_HOST_TO_TILE_STS, &word);
+	if (ret < 0) {
+		ERROR("read_rshim error %d", ret);
+		return ret;
+	}
+	avail = max_size - (int)(word & RSH_TM_HOST_TO_TILE_STS__COUNT_MASK)
+		- 1;
+
+	return avail;
+}
+
+static int rshim_fifo_sync(struct rshim_backend *bd)
+{
+	int i, avail, ret;
+	union rshim_tmfifo_msg_hdr hdr;
+
+	avail = rshim_fifo_tx_avail(bd);
+	if (avail < 0)
+		return avail;
+
+	hdr.data = 0;
+	hdr.type = VIRTIO_ID_NET;
+
+	for (i = 0; i < avail; i++) {
+		ret = bd->write_rshim(bd, RSHIM_CHANNEL,
+				      RSH_TM_HOST_TO_TILE_DATA, hdr.data);
+		if (ret < 0)
+			return ret;
+	}
+
+	return 0;
+}
+
+/* Just adds up all the bytes of the header. */
+static u8 rshim_fifo_ctrl_checksum(union rshim_tmfifo_msg_hdr *hdr)
+{
+	u8 checksum = 0;
+	int i;
+
+	for (i = 0; i < sizeof(*hdr); i++)
+		checksum += ((u8 *)hdr)[i];
+
+	return checksum;
+}
+
+static void rshim_fifo_ctrl_update_checksum(union rshim_tmfifo_msg_hdr *hdr)
+{
+	u8 checksum;
+
+	hdr->checksum = 0;
+	checksum = rshim_fifo_ctrl_checksum(hdr);
+	hdr->checksum = ~checksum + 1;
+}
+
+static bool rshim_fifo_ctrl_verify_checksum(union rshim_tmfifo_msg_hdr *hdr)
+{
+	u8 checksum = rshim_fifo_ctrl_checksum(hdr);
+
+	return checksum ? false : true;
+}
+
+static void rshim_fifo_ctrl_rx(struct rshim_backend *bd,
+			       union rshim_tmfifo_msg_hdr *hdr)
+{
+	if (!rshim_fifo_ctrl_verify_checksum(hdr))
+		return;
+
+	switch (hdr->type) {
+	case TMFIFO_MSG_MAC_1:
+		memcpy(bd->peer_mac, hdr->mac, 3);
+		break;
+	case TMFIFO_MSG_MAC_2:
+		memcpy(bd->peer_mac + 3, hdr->mac, 3);
+		break;
+	case TMFIFO_MSG_PXE_ID:
+		bd->pxe_client_id = ntohl(hdr->pxe_id);
+		/* Last info to receive, set the flag. */
+		bd->peer_ctrl_resp = 1;
+		wake_up_interruptible_all(&bd->ctrl_wait);
+		break;
+	default:
+		return;
+	}
+}
+
+static int rshim_fifo_ctrl_tx(struct rshim_backend *bd)
+{
+	union rshim_tmfifo_msg_hdr hdr;
+	int len = 0;
+
+	if (bd->peer_mac_set) {
+		bd->peer_mac_set = 0;
+		hdr.data = 0;
+		hdr.type = TMFIFO_MSG_MAC_1;
+		memcpy(hdr.mac, bd->peer_mac, 3);
+		rshim_fifo_ctrl_update_checksum(&hdr);
+		memcpy(bd->write_buf, &hdr.data, sizeof(hdr.data));
+		hdr.type = TMFIFO_MSG_MAC_2;
+		memcpy(hdr.mac, bd->peer_mac + 3, 3);
+		rshim_fifo_ctrl_update_checksum(&hdr);
+		memcpy(bd->write_buf + sizeof(hdr.data), &hdr.data,
+		       sizeof(hdr.data));
+		len = sizeof(hdr.data) * 2;
+	} else if (bd->peer_pxe_id_set) {
+		bd->peer_pxe_id_set = 0;
+		hdr.data = 0;
+		hdr.type = TMFIFO_MSG_PXE_ID;
+		hdr.pxe_id = htonl(bd->pxe_client_id);
+		rshim_fifo_ctrl_update_checksum(&hdr);
+		memcpy(bd->write_buf, &hdr.data, sizeof(hdr.data));
+		len = sizeof(hdr.data);
+	} else if (bd->peer_ctrl_req) {
+		bd->peer_ctrl_req = 0;
+		hdr.data = 0;
+		hdr.type = TMFIFO_MSG_CTRL_REQ;
+		rshim_fifo_ctrl_update_checksum(&hdr);
+		memcpy(bd->write_buf, &hdr.data, sizeof(hdr.data));
+		len = sizeof(hdr.data);
+	}
+
+	return len;
 }
 
 /* Drain the read buffer, and start another read/interrupt if needed. */
@@ -851,11 +1005,19 @@ again:
 				if (bd->read_buf_pkt_rem == 0)
 					continue;
 			} else {
-				pr_debug("bad type %d, drop it", hdr->type);
 				bd->read_buf_pkt_rem = 0;
 				bd->read_buf_pkt_padding = 0;
-				bd->read_buf_next = bd->read_buf_bytes;
-				break;
+				if (hdr->len == 0) {
+					bd->read_buf_next += sizeof(*hdr);
+					rshim_fifo_ctrl_rx(bd, hdr);
+					continue;
+				}
+				else {
+					pr_debug("bad type %d, drop it",
+						 hdr->type);
+					bd->read_buf_next = bd->read_buf_bytes;
+					break;
+				}
 			}
 
 			pr_debug("drain: hdr, nxt %d rem %d chn %d\n",
@@ -1108,6 +1270,15 @@ static void rshim_fifo_output(struct rshim_backend *bd)
 	/* If we're already writing, we have nowhere to put data. */
 	if (bd->spin_flags & RSH_SFLG_WRITING)
 		return;
+
+	if (!bd->write_buf_pkt_rem) {
+		/* Send control messages. */
+		writesize = rshim_fifo_ctrl_tx(bd);
+		if (writesize > 0) {
+			write_avail -= writesize;
+			write_buf_next += writesize;
+		}
+	}
 
 	/* Walk through all the channels, sending as much data as possible. */
 	for (chan_offset = 0; chan_offset < numchan; chan_offset++) {
@@ -1663,8 +1834,7 @@ static void rshim_work_handler(struct work_struct *work)
 			wake_up_interruptible_all(&bd->write_completed);
 			rshim_notify(bd, RSH_EVENT_FIFO_OUTPUT, 0);
 		} else {
-			ERROR("fifo_write: completed abnormally.");
-			rshim_notify(bd, RSH_EVENT_FIFO_ERR, -1);
+			ERROR("fifo_write: completed abnormally (%d).", len);
 		}
 		spin_unlock(&bd->spinlock);
 	}
@@ -1945,12 +2115,15 @@ static int
 rshim_misc_seq_show(struct seq_file *s, void *token)
 {
 	struct rshim_backend *bd = s->private;
+	u8 *mac = bd->peer_mac;
 	int retval;
 	u64 value;
 
 	/* Boot mode. */
+	mutex_lock(&bd->mutex);
 	retval = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_BOOT_CONTROL,
 				&value);
+	mutex_unlock(&bd->mutex);
 	if (retval) {
 		ERROR("couldn't read rshim register");
 		return retval;
@@ -1964,6 +2137,26 @@ rshim_misc_seq_show(struct seq_file *s, void *token)
 	/* Display the driver name. */
 	seq_printf(s, "DRV_NAME  %s\n", bd->owner->name);
 
+	/* The rest are advanced options. */
+	if (!rshim_adv_cfg)
+		return 0;
+
+	/*
+	 * Display the target-side information. Send a request and wait for
+	 * some time for the response.
+	 */
+	mutex_lock(&bd->mutex);
+	bd->peer_ctrl_req = 1;
+	bd->peer_ctrl_resp = 0;
+	memset(mac, 0, 6);
+	bd->has_cons_work = 1;
+	mutex_unlock(&bd->mutex);
+	queue_delayed_work(rshim_wq, &bd->work, 0);
+	wait_event_interruptible_timeout(bd->ctrl_wait, bd->peer_ctrl_resp, HZ);
+	seq_printf(s, "PEER_MAC  %02x:%02x:%02x:%02x:%02x:%02x\n",
+		   mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+	seq_printf(s, "PXE_ID    0x%08x\n", htonl(bd->pxe_client_id));
+
 	return 0;
 }
 
@@ -1971,8 +2164,8 @@ static ssize_t rshim_misc_write(struct file *file, const char *user_buffer,
 				size_t count, loff_t *ppos)
 {
 	struct rshim_backend *bd;
-	int retval = 0, value;
-	char buf[64], key[32];
+	int i, retval = 0, value, mac[6];
+	char buf[64], key[32], *p = buf;
 
 	if (*ppos != 0 || count >= sizeof(buf))
 		return -EINVAL;
@@ -1980,16 +2173,22 @@ static ssize_t rshim_misc_write(struct file *file, const char *user_buffer,
 	/* Copy the data from userspace */
 	if (copy_from_user(buf, user_buffer, count))
 		return -EFAULT;
+	buf[sizeof(buf) - 1] = '\0';
 
-	if (sscanf(buf, "%s %x", key, &value) != 2)
+	if (sscanf(p, "%s", key) != 1)
 		return -EINVAL;
+        p += strlen(key);
 
 	bd = ((struct seq_file *)file->private_data)->private;
 
 	if (strcmp(key, "BOOT_MODE") == 0) {
+		if (sscanf(p, "%x", &value) != 1)
+			return -EINVAL;
 		retval = bd->write_rshim(bd, RSHIM_CHANNEL, RSH_BOOT_CONTROL,
 				 value & RSH_BOOT_CONTROL__BOOT_MODE_MASK);
 	} else if (strcmp(key, "SW_RESET") == 0) {
+		if (sscanf(p, "%x", &value) != 1)
+			return -EINVAL;
 		if (value) {
 			if (!bd->has_reprobe) {
 				/* Detach, which shouldn't hold bd->mutex. */
@@ -2013,8 +2212,29 @@ static ssize_t rshim_misc_write(struct file *file, const char *user_buffer,
 				mutex_unlock(&bd->mutex);
 			}
 		}
-	} else
+	} else if (strcmp(key, "PEER_MAC") == 0) {
+		if (sscanf(p, "%x:%x:%x:%x:%x:%x",
+		    &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) != 6)
+			return -EINVAL;
+		mutex_lock(&bd->mutex);
+		for (i = 0; i < 6; i++)
+			bd->peer_mac[i] = mac[i];
+		bd->peer_mac_set = 1;
+		bd->has_cons_work = 1;
+		queue_delayed_work(rshim_wq, &bd->work, 0);
+		mutex_unlock(&bd->mutex);
+	} else if (strcmp(key, "PXE_ID") == 0) {
+		if (sscanf(p, "%x", &value) != 1)
+			return -EINVAL;
+		mutex_lock(&bd->mutex);
+		bd->pxe_client_id = ntohl(value);
+		bd->peer_pxe_id_set = 1;
+		bd->has_cons_work = 1;
+		queue_delayed_work(rshim_wq, &bd->work, 0);
+		mutex_unlock(&bd->mutex);
+	} else {
 		return -EINVAL;
+	}
 
 	return retval? retval : count;
 }
@@ -2146,46 +2366,6 @@ static const struct file_operations rshim_fops = {
 	.open =	rshim_open,
 };
 
-int rshim_tmfifo_sync(struct rshim_backend *bd)
-{
-	u64 word;
-	int i, retval, max_size, avail;
-	union rshim_tmfifo_msg_hdr hdr;
-
-	/* Get FIFO max size. */
-	retval = bd->read_rshim(bd, RSHIM_CHANNEL,
-				RSH_TM_HOST_TO_TILE_CTL, &word);
-	if (retval < 0) {
-		ERROR("read_rshim error %d", retval);
-		return retval;
-	}
-	max_size = (word >> RSH_TM_HOST_TO_TILE_CTL__MAX_ENTRIES_SHIFT)
-		   & RSH_TM_HOST_TO_TILE_CTL__MAX_ENTRIES_RMASK;
-
-	/* Calculate available size. */
-	retval = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_TM_HOST_TO_TILE_STS,
-				&word);
-	if (retval < 0) {
-		ERROR("read_rshim error %d", retval);
-		return retval;
-	}
-	avail = max_size - (int)(word & RSH_TM_HOST_TO_TILE_STS__COUNT_MASK);
-
-	if (avail > TMFIFO_MAX_SYNC_WORDS)
-		avail = TMFIFO_MAX_SYNC_WORDS;
-
-	hdr.type = VIRTIO_ID_NET;
-	hdr.len = 0;
-	for (i = 0; i < avail; i++) {
-		retval = bd->write_rshim(bd, RSHIM_CHANNEL,
-					 RSH_TM_HOST_TO_TILE_STS, hdr.data);
-		if (retval < 0)
-			break;
-	}
-
-	return 0;
-}
-
 int rshim_notify(struct rshim_backend *bd, int event, int code)
 {
 	int i, rc = 0;
@@ -2209,7 +2389,7 @@ int rshim_notify(struct rshim_backend *bd, int event, int code)
 
 		/* Sync-up the tmfifo if reprobe is not supported. */
 		if (!bd->has_reprobe && bd->has_rshim)
-			rshim_tmfifo_sync(bd);
+			rshim_fifo_sync(bd);
 
 		rcu_read_lock();
 		for (i = 0; i < RSH_SVC_MAX; i++) {
@@ -2446,6 +2626,7 @@ int rshim_register(struct rshim_backend *bd)
 	}
 
 	init_waitqueue_head(&bd->write_completed);
+	init_waitqueue_head(&bd->ctrl_wait);
 	init_completion(&bd->booting_complete);
 	init_completion(&bd->boot_write_complete);
 	memcpy(&bd->cons_termios, &init_console_termios,
@@ -2760,4 +2941,4 @@ module_exit(rshim_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Mellanox Technologies");
-MODULE_VERSION("0.12");
+MODULE_VERSION("0.16");

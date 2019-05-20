@@ -1,0 +1,62 @@
+rshim (1.6-0) unstable; urgency=low
+
+  * rshim: Fixed 91-tmfifo_net.rules for Ubuntu
+  * rshim/tmfifo driver: Add checksum for ctrl messages
+  * Lx: sync up to HW P4 @330081
+  * rshim/tmfifo driver: Setting DHCP client identifier
+  * rshim/pcie: fix the slow responding when tmfifo is full
+  * Add back "RShim/TmFifo: Peer MAC address configuration"
+  * Revert "RShim/TmFifo: Peer MAC address configuration"
+  * Improve linux driver register generation script
+  * RShim/TmFifo: Peer MAC address configuration
+  * rshim/pcie: Fix the return value in rshim_pcie_probe()
+  * Lx: sync up to HW P4 @293831
+  * rshim/console: only allow one console opened at a time
+  * rshim: add rshim_sw_reset_skip module argument
+  * Viper/RShim/USB: Support RShim/USB product ID for Viper
+  * Make adjustments to drivers to make upstreaming easier
+  * rshim_pcie_lf: fix hung issue and add console/net support
+  * rshim/tmfifo out-of-sync prevention
+  * Auto-select rshim driver at runtime
+  * Load rshim_net automatically
+  * Rshim driver: support centos 6.6
+  * RShim driver: adjust the installation path from source code
+  * Avoid rshim drivers being added into initramfs
+  * RShim/PCIe network throughput very low when rshim/console is opened
+  * Several rshim driver robust changes for rshim/PCIe
+  * tmfifo_net: Fix the udev script to bring up the interface
+  * rshim_net: Assign unique MAC addresses to multiple instances
+  * Move rshim README to the Documentation directory
+  * RShim driver: change debug level of some messages
+  * rshim driver: Fix a build warning on CentOS 7.4
+  * Added sign-modules script to all BF drivers
+  * Add script to generate needed register info
+  * Update our generated register header file format
+  * rshim driver: Remove the multi_function.rshim_pf_en from README
+  * RShim driver: Fix the rshim console issue over pcie
+
+ -- Vladimir Sokolovsky <vlad@mellanox.com>  Tue, 30 Apr 2019 13:45:10 +0200
+
+rshim (0.8-0) unstable; urgency=low
+
+  * rshim: Added UDEV rules file
+  * RShim driver: Initialize the virtio packet header
+  * RShim driver: Linux kernel 4.15 support
+  * Add 32-bit kernel support for rshim_pcie driver
+  * Bug fix for rshim_net
+  * CentOS README improvement
+  * rshim driver: Fix the changing rshim name
+  * rshim driver: Add module argument for host MAC
+  * Add rshim misc file
+  * rshim driver fix
+  * Add support for RShim console and net over PCIe
+  * rshim_net cleanup when it fails to load
+  * Rshim driver more kernel version support
+
+ -- Vladimir Sokolovsky <vlad@mellanox.com>  Thu, 5 Apr 2018 14:25:22 +0200
+
+rshim (0.2-0) unstable; urgency=low
+
+  * Initial release.
+
+ -- Vladimir Sokolovsky <vlad@mellanox.com>  Mon, 11 Dec 2017 11:50:53 -0600

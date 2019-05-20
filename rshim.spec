@@ -27,7 +27,7 @@
 #
 
 %{!?_name: %define _name rshim}
-%{!?_version: %define _version 1.2}
+%{!?_version: %define _version 1.7}
 %{!?_release: %define _release 0}
 
 # KMP is disabled by default

@@ -88,12 +88,24 @@ enum {
 	RSH_SVC_MAX
 };
 
+/* Internal message types in addition to the standard VIRTIO_ID_xxx types. */
+enum {
+	TMFIFO_MSG_PXE_ID = 0xFC,	/* pxe client identifier */
+	TMFIFO_MSG_CTRL_REQ = 0xFD,	/* ctrl request */
+	TMFIFO_MSG_MAC_1 = 0xFE,	/* mac[0:2] */
+	TMFIFO_MSG_MAC_2 = 0xFF,	/* mac[3:4] */
+};
+
 /* TMFIFO message header. */
 union rshim_tmfifo_msg_hdr {
 	struct {
 		u8 type;		/* message type */
 		__be16 len;		/* payload length */
-		u8 unused[5];		/* reserved, set to 0 */
+		union {
+			u8 mac[3];	/* 3-bytes of the MAC address */
+			__be32 pxe_id;	/* pxe identifier */
+		} __packed;
+		u8 checksum;		/* header checksum */
 	} __packed;
 	u64 data;
 };
@@ -171,6 +183,10 @@ struct rshim_backend {
 	u32 drop : 1;              /* Drop the rest of the packet. */
 	u32 registered : 1;        /* Backend has been registered. */
 	u32 keepalive : 1;         /* A flag to update keepalive. */
+	u32 peer_ctrl_req : 1;     /* A flag to send ctrl request. */
+	u32 peer_ctrl_resp : 1;    /* A flag to indicate MAC response rcvd. */
+	u32 peer_mac_set : 1;      /* A flag to send MAC-set request. */
+	u32 peer_pxe_id_set : 1;   /* A flag to send pxe-id-set request. */
 
 	/* Jiffies of last keepalive. */
 	u64 last_keepalive;
@@ -244,6 +260,9 @@ struct rshim_backend {
 	 */
 	wait_queue_head_t write_completed;
 
+	/* Wait queue for control messages. */
+	wait_queue_head_t ctrl_wait;
+
 	/* State for our outstanding boot write. */
 	struct completion boot_write_complete;
 
@@ -284,6 +303,12 @@ struct rshim_backend {
 	 * minor number.
 	 */
 	int dev_index;
+
+	/* Configured MAC address of the peer-side. */
+	u8 peer_mac[6];
+
+	/* Configured PXE client identifier. */
+	u32 pxe_client_id;
 
 	/* APIs provided by backend. */
 
@@ -332,6 +357,9 @@ struct rshim_service {
 
 /* Global array to store RShim devices and names. */
 extern struct workqueue_struct *rshim_wq;
+
+/* Boot timeout value. */
+extern int rshim_boot_timeout;
 
 /* Common APIs. */
 
