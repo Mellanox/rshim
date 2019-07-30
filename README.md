@@ -51,14 +51,26 @@ release tarball.
   Key/Value pairs used to read/write misc information. For example,
     # Dump the content.
     cat /dev/rshim<N>/misc
-      BOOT_MODE 1                   # eMMC boot mode
-                                    #   0: boot from USB/PCIe, 1: boot from eMMC
+      BOOT_MODE 1                   # eMMC boot mode (0:USB/PCIe, 1: eMMC)
       SW_RESET  0                   # Set to 1 to initiate SW RESET
       DRV_NAME  rshim_usb           # Backend driver name (display-only)
+
+    # Turn on the 'rshim_adv_cfg' flag could display more information like
+    # below.
+    echo 1 > /sys/module/rshim/parameters/rshim_adv_cfg
+    cat /dev/rshim<N>/misc
+      ...
+      PEER_MAC  00:1a:ca:ff:ff:01   # Target-side MAC address
+      PXE_ID    0x01020304          # PXE DHCP-client-identifier
 
     # Initiate a SW reset.
     # It'll depend on the 'BOOT_MODE' to boot from USB/PCIe or eMMC.
     echo "SW_RESET 1" > /dev/rshim<N>/misc
+
+    The 'PEER_MAC' attribute can be used to display/set the target-side MAC
+    address of the rshim network interface. It works when the target-side is in
+    UEFI BootManager or in Linux where the tmfifo has been loaded. The new MAC
+    address will take effect in next boot.
 
 *) What if both USB and PCIe access are enabled
 
@@ -93,13 +105,14 @@ release tarball.
   - The ARM side tmfifo interface should have unique MAC and IP as well, which
     can be done in the console.
 
-*) How to change the MAC address of the ARM side permanently
+*) How to change the MAC address of the ARM side interface permanently
 
-  - Login into Linux from the ARM console;
-  - mount -t efivarfs none /sys/firmware/efi/efivars
-  - chattr -i /sys/firmware/efi/efivars/RshimMacAddr-8be4df61-93ca-11d2-aa0d-00e098032b8c
-  - printf "\x07\x00\x00\x00\x00\x1a\xca\xff\xff\x03" > \
-      /sys/firmware/efi/efivars/RshimMacAddr-8be4df61-93ca-11d2-aa0d-00e098032b8c
+  # Below is an example to change the MAC address from 00:1a:ca:ff:ff:01 to
+  # 00:1a:ca:ff:ff:10.
 
-  The above 'printf' command set the MAC address to 00:1a:ca:ff:ff:03 (the last
-  six bytes of the printf value).
+  echo 1 > /sys/module/rshim/parameters/rshim_adv_cfg
+  cat /dev/rshim<N>/misc
+    ...
+    PEER_MAC  00:1a:ca:ff:ff:01   # This is the current configured MAC address
+    ...
+  echo "PEER_MAC 00:1a:ca:ff:ff:10" > /dev/rshim<N>/misc

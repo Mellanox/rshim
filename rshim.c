@@ -33,6 +33,9 @@
 #include <linux/circ_buf.h>
 #include <linux/delay.h>
 #include <linux/virtio_ids.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#include <linux/sched/signal.h>
+#endif
 
 #include "rshim.h"
 
@@ -56,6 +59,11 @@ MODULE_PARM_DESC(rshim_sw_reset_skip, "Skip SW_RESET during booting");
 static int rshim_adv_cfg;
 module_param(rshim_adv_cfg, int, 0644);
 MODULE_PARM_DESC(rshim_adv_cfg, "Advanced configuration");
+
+int rshim_boot_timeout = 100;
+module_param(rshim_boot_timeout, int, 0644);
+MODULE_PARM_DESC(rshim_boot_timeout, "Boot timeout in seconds");
+EXPORT_SYMBOL(rshim_boot_timeout);
 
 #define RSH_KEEPALIVE_MAGIC_NUM 0x5089836482ULL
 
@@ -321,7 +329,8 @@ static ssize_t rshim_write_delayed(struct rshim_backend *bd, int devtype,
 	u64 word;
 	char pad_buf[sizeof(u64)] = { 0 };
 	int size_addr, size_mask, data_addr, max_size;
-	int retval, avail = 0, byte_cnt = 0, retry;
+	int retval, avail = 0, byte_cnt = 0;
+	unsigned long timeout, cur_time;
 
 	switch (devtype) {
 	case RSH_DEV_TYPE_NET:
@@ -353,6 +362,8 @@ static ssize_t rshim_write_delayed(struct rshim_backend *bd, int devtype,
 		return -EINVAL;
 	}
 
+	timeout = msecs_to_jiffies(rshim_boot_timeout * 1000);
+
 	while (byte_cnt < count) {
 		/* Check the boot cancel condition. */
 		if (devtype == RSH_DEV_TYPE_BOOT && !bd->boot_work_buf)
@@ -364,7 +375,7 @@ static ssize_t rshim_write_delayed(struct rshim_backend *bd, int devtype,
 			buf = (const char *)pad_buf;
 		}
 
-		retry = 0;
+		cur_time = jiffies + timeout;
 		while (avail <= 0) {
 			/* Calculate available space in words. */
 			retval = bd->read_rshim(bd, RSHIM_CHANNEL, size_addr,
@@ -377,11 +388,8 @@ static ssize_t rshim_write_delayed(struct rshim_backend *bd, int devtype,
 			if (avail > 0)
 				break;
 
-			/*
-			 * Retry 100s, or else return failure since the other
-			 * side seems not to be responding.
-			 */
-			if (++retry > 100000)
+			/* Return failure if the peer is not responding. */
+			if (time_after(jiffies, cur_time))
 				return -ETIMEDOUT;
 			mutex_unlock(&bd->mutex);
 			msleep(1);
@@ -555,6 +563,10 @@ static ssize_t rshim_boot_write(struct file *file, const char *user_buffer,
 		} else if (retval == 0) {
 			/* Wait for some time instead of busy polling. */
 			msleep_interruptible(1);
+			if (signal_pending(current)) {
+				retval = -ERESTARTSYS;
+				break;
+			}
 			continue;
 		}
 		if (retval != buf_bytes)
@@ -783,7 +795,7 @@ int rshim_boot_open(struct file *file)
 	 */
 	retval = wait_for_completion_interruptible_timeout(&bd->reset_complete,
 							   5 * HZ);
-	if (retval == 0)
+	if (retval == 0 && bd->has_reprobe)
 		ERROR("timed out waiting for device reprobe after reset");
 
 	while (devs_locked) {
@@ -2932,4 +2944,4 @@ module_exit(rshim_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Mellanox Technologies");
-MODULE_VERSION("0.15");
+MODULE_VERSION("0.17");

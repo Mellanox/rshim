@@ -262,7 +262,8 @@ static ssize_t rshim_usb_boot_write(struct rshim_usb *dev, const char *buf,
 	 * the callback function might never get called and cause stuck.
 	 * Here we release the mutex so user could use 'ctrl + c' to terminate
 	 * the current write. Once the boot file is opened again, the
-	 * outstanding urb will be canceled.
+	 * outstanding urb will be canceled. If not interrupted, it'll timeout
+	 * according to the setting of rshim_boot_timeout in seconds.
 	 *
 	 * Note: when boot stream starts to write, it will either run to
 	 * completion, or be interrupted by user. The urb callback function will
@@ -270,11 +271,22 @@ static ssize_t rshim_usb_boot_write(struct rshim_usb *dev, const char *buf,
 	 * the boot stream. So unlocking the mutex is considered safe.
 	 */
 	mutex_unlock(&bd->mutex);
-	retval = wait_for_completion_interruptible(&bd->boot_write_complete);
+	retval = wait_for_completion_interruptible_timeout(
+					&bd->boot_write_complete,
+					rshim_boot_timeout * HZ);
+	if (!retval) {
+		/* Abort if timeout. */
+		bytes_written = 0;
+		retval = -ETIMEDOUT;
+	}
+	else if (retval > 0)
+		retval = 0;
+
 	mutex_lock(&bd->mutex);
-	if (retval) {
+	if (retval < 0) {
 		usb_kill_urb(dev->boot_urb);
-		bytes_written += dev->boot_urb->actual_length;
+		if (retval != -ETIMEDOUT)
+			bytes_written += dev->boot_urb->actual_length;
 		goto done;
 	}
 
@@ -1045,4 +1057,4 @@ module_exit(rshim_usb_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Mellanox Technologies");
-MODULE_VERSION("0.7");
+MODULE_VERSION("0.8");
