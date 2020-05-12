@@ -54,6 +54,9 @@ static bool rshim_net_draining_mode;
 /* Spin lock. */
 static DEFINE_SPINLOCK(rshim_net_spin_lock);
 
+/* Work queue. */
+static struct workqueue_struct *rshim_net_wq;
+
 /* Virtio ring size. */
 static int rshim_net_vring_size = RSH_NET_VRING_SIZE;
 module_param(rshim_net_vring_size, int, 0444);
@@ -212,7 +215,11 @@ struct rshim_net {
 	int tx_fifo_size;		/* number of entries of the Tx FIFO */
 	int rx_fifo_size;		/* number of entries of the Rx FIFO */
 	unsigned long pend_events;	/* pending bits for deferred process */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
 	struct work_struct work;	/* work struct for deferred process */
+#else
+	struct delayed_work work;
+#endif
 	struct timer_list timer;	/* keepalive timer */
 	unsigned long rx_jiffies;	/* last Rx jiffies */
 	struct rshim_net_vring vrings[RSH_NET_VRING_NUM];
@@ -268,10 +275,16 @@ static void rshim_net_free_vrings(struct rshim_net *net)
 }
 
 /* Work handler for Rx, Tx or activity monitoring. */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+static void rshim_net_work_handler(void *arg)
+{
+	struct rshim_net *net = arg;
+#else
 static void rshim_net_work_handler(struct work_struct *work)
 {
+	struct rshim_net *net = container_of(work, struct rshim_net, work.work);
+#endif
 	struct virtqueue *vq;
-	struct rshim_net *net = container_of(work, struct rshim_net, work);
 
 	/* Tx. */
 	if (test_and_clear_bit(RSH_NET_TX_EVENT, &net->pend_events) &&
@@ -374,7 +387,7 @@ static void rshim_net_timer(unsigned long arg)
 	 */
 	test_and_set_bit(RSH_NET_TX_EVENT, &net->pend_events);
 
-	schedule_work(&net->work);
+	queue_delayed_work(rshim_net_wq, &net->work, 0);
 
 	mod_timer(&net->timer, jiffies + rshim_net_timer_interval);
 }
@@ -598,7 +611,8 @@ static void rshim_net_virtio_rxtx(struct virtqueue *vq, bool is_rx)
 			if (!is_rx) {
 				if (!test_and_set_bit(RSH_NET_TX_EVENT,
 				    &net->pend_events))
-					schedule_work(&net->work);
+					queue_delayed_work(rshim_net_wq,
+							   &net->work, 0);
 			}
 			break;
 		}
@@ -623,11 +637,11 @@ static VIRTIO_NOTIFY_RETURN_TYPE rshim_net_virtio_notify(struct virtqueue *vq)
 	if (!(vring->id & 1)) {
 		/* Set the RX bit. */
 		if (!test_and_set_bit(RSH_NET_RX_EVENT, &net->pend_events))
-			schedule_work(&net->work);
+			queue_delayed_work(rshim_net_wq, &net->work, 0);
 	} else {
 		/* Set the TX bit. */
 		if (!test_and_set_bit(RSH_NET_TX_EVENT, &net->pend_events))
-			schedule_work(&net->work);
+			queue_delayed_work(rshim_net_wq, &net->work, 0);
 	}
 
 	VIRTIO_NOTIFY_RETURN;
@@ -832,7 +846,7 @@ static int rshim_net_delete_dev(struct rshim_net *net)
 		del_timer_sync(&net->timer);
 
 		/* Cancel the pending work. */
-		cancel_work_sync(&net->work);
+		cancel_delayed_work_sync(&net->work);
 
 		/* Unregister virtio. */
 		if (net->virtio_registered)
@@ -854,7 +868,7 @@ void rshim_net_rx_notify(struct rshim_backend *bd)
 
 	if (net) {
 		test_and_set_bit(RSH_NET_RX_EVENT, &net->pend_events);
-		schedule_work(&net->work);
+		queue_delayed_work(rshim_net_wq, &net->work, 0);
 	}
 }
 
@@ -885,7 +899,11 @@ int rshim_net_create(struct rshim_backend *bd)
 	if (!net)
 		return ret;
 
-	INIT_WORK(&net->work, rshim_net_work_handler);
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 20)
+	INIT_WORK(&net->work, rshim_net_work_handler, net);
+#else
+	INIT_DELAYED_WORK(&net->work, rshim_net_work_handler);
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4,15,0)
 	timer_setup(&net->timer, rshim_net_timer, 0);
@@ -950,6 +968,16 @@ struct rshim_service rshim_svc = {
 
 static int __init rshim_net_init(void)
 {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 36)
+	rshim_net_wq = create_workqueue("rshim_net");
+#else
+	rshim_net_wq = alloc_workqueue("rshim_net",
+				       WQ_MEM_RECLAIM | WQ_FREEZABLE | WQ_UNBOUND,
+				       0);
+#endif
+	if (!rshim_net_wq)
+		return -ENOMEM;
+
 	return rshim_register_service(&rshim_svc);
 }
 
@@ -962,6 +990,8 @@ static void __exit rshim_net_exit(void)
 	rshim_net_draining_mode = true;
 	msleep(200);
 
+	destroy_workqueue(rshim_net_wq);
+
 	return rshim_deregister_service(&rshim_svc);
 }
 
@@ -970,4 +1000,4 @@ module_exit(rshim_net_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Mellanox Technologies");
-MODULE_VERSION("0.7");
+MODULE_VERSION("0.9");

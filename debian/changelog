@@ -1,3 +1,65 @@
+rshim (1.21-0) unstable; urgency=low
+
+  * rshim driver: fix race condition during fw reset
+  * rshim driver: add domain id to the DEV_NAME of pcie/pcie_lf
+
+ --  Liming Sun <lsun@mellanox.com>  Fri, 08 May 2020 13:51:40 +0200
+
+rshim (1.20-0) unstable; urgency=low
+
+  * rshim driver: display the ASSERT rshim log message
+
+ --  Liming Sun <lsun@mellanox.com>  Mon, 30 Mar 2020 09:30:44 +0200
+
+rshim (1.19-0) unstable; urgency=low
+
+  * rshim driver: make the sw_reset_skip parameter writable
+
+ --  Liming Sun <lsun@mellanox.com>  Fri, 13 Mar 2020 16:26:15 +0200
+
+rshim (1.18-0) unstable; urgency=low
+
+  * rshim logging enhancement
+
+ --  Liming Sun <lsun@mellanox.com>  Mon, 20 Jan 2020 09:58:20 +0200
+
+rshim (1.17-0) unstable; urgency=low
+
+  * Display rshim scratch buffer
+
+ --  Liming Sun <lsun@mellanox.com>  Tue, 7 Jan 2020 17:57:20 +0200
+
+rshim (1.16-0) unstable; urgency=low
+
+  * rshim: fix compiling issue for kernel version below 2.6.36
+
+ --  Liming Sun <lsun@mellanox.com>  Mon, 2 Dec 2019 10:25:57 +0200
+
+rshim (1.15-0) unstable; urgency=low
+
+  * rshim: use seperate workqueue for rshim_net
+
+ --  Liming Sun <lsun@mellanox.com>  Tue, 26 Nov 2019 18:21:57 +0200
+
+rshim (1.14-0) unstable; urgency=low
+
+  * rshim: Display the backend device path
+
+rshim (1.13-0) unstable; urgency=low
+
+  * rshim: fix the udev rules for ubuntu
+  * rshim driver: increase rshim_net auto-loading time to 10 seconds
+  * rshim driver: Fix potential lockup issue
+  * Rshim PCIe driver updates
+  * rshim: add vlan id configuration
+  * Reset the chip if cold boot with boot mode set to 0
+  * drivers/rshim: set RESET_CHIP bits only when resetting the ARM
+  * rshim/pcie: disable a false error message
+  * Viper: rshim_usb should wait for USB interface to be enabled
+  * Update viper devid IDs
+  * Fix the rshim compiling issue for new kernels
+  * rshim driver: improve the 'ctrl+c' abort and timeout behavior
+
 rshim (1.6-0) unstable; urgency=low
 
   * rshim: Fixed 91-tmfifo_net.rules for Ubuntu
