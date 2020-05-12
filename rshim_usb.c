@@ -60,7 +60,7 @@ MODULE_PARM_DESC(rshim_disable, "Disable rshim (obsoleted)");
 /* Our USB vendor/product IDs. */
 #define USB_TILERA_VENDOR_ID	0x22dc	 /* Tilera Corporation */
 #define USB_BLUEFIELD_1_PRODUCT_ID	0x0004	 /* Mellanox Bluefield-1 */
-#define USB_BLUEFIELD_2_PRODUCT_ID	0x0212	 /* Mellanox Bluefield-2 */
+#define USB_BLUEFIELD_2_PRODUCT_ID	0x0214	 /* Mellanox Bluefield-2 */
 
 /* Number of retries for the tmfifo read/write path. */
 #define READ_RETRIES		5
@@ -669,7 +669,7 @@ static int rshim_usb_probe(struct usb_interface *interface,
 			 const struct usb_device_id *id)
 {
 	char *usb_dev_name;
-	int dev_name_len = 32;
+	int dev_name_len = 64;
 	struct rshim_usb *dev = NULL;
 	struct rshim_backend *bd;
 	struct usb_host_interface *iface_desc;
@@ -1057,4 +1057,4 @@ module_exit(rshim_usb_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Mellanox Technologies");
-MODULE_VERSION("0.8");
+MODULE_VERSION("0.9");

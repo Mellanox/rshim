@@ -33,6 +33,9 @@
 #include <linux/circ_buf.h>
 #include <linux/delay.h>
 #include <linux/virtio_ids.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+#include <linux/sched/signal.h>
+#endif
 
 #include "rshim.h"
 
@@ -50,14 +53,10 @@ module_param(rshim_keepalive_period, int, 0644);
 MODULE_PARM_DESC(rshim_keepalive_period, "Keepalive period in milliseconds");
 
 static int rshim_sw_reset_skip;
-module_param(rshim_sw_reset_skip, int, 0444);
+module_param(rshim_sw_reset_skip, int, 0644);
 MODULE_PARM_DESC(rshim_sw_reset_skip, "Skip SW_RESET during booting");
 
-static int rshim_adv_cfg;
-module_param(rshim_adv_cfg, int, 0644);
-MODULE_PARM_DESC(rshim_adv_cfg, "Advanced configuration");
-
-int rshim_boot_timeout = 100;
+int rshim_boot_timeout = 300;
 module_param(rshim_boot_timeout, int, 0644);
 MODULE_PARM_DESC(rshim_boot_timeout, "Boot timeout in seconds");
 EXPORT_SYMBOL(rshim_boot_timeout);
@@ -243,6 +242,9 @@ static struct rshim_service *rshim_svc[RSH_SVC_MAX];
 /* FIFO reset. */
 static void rshim_fifo_reset(struct rshim_backend *bd);
 
+/* Display level of the misc device file. */
+static int rshim_misc_level;
+
 /* Global lock / unlock. */
 
 void rshim_lock(void)
@@ -389,8 +391,10 @@ static ssize_t rshim_write_delayed(struct rshim_backend *bd, int devtype,
 			if (time_after(jiffies, cur_time))
 				return -ETIMEDOUT;
 			mutex_unlock(&bd->mutex);
-			msleep(1);
+			msleep_interruptible(1);
 			mutex_lock(&bd->mutex);
+			if (signal_pending(current))
+				return -ERESTARTSYS;
 		}
 
 		word = *(u64 *)buf;
@@ -461,6 +465,44 @@ static ssize_t rshim_write_default(struct rshim_backend *bd, int devtype,
 	}
 }
 
+/*
+ * Write to the RShim reset control register.
+ */
+static int rshim_write_reset_control(struct rshim_backend *bd)
+{
+	int ret;
+	u64 word;
+	u32 val;
+	u8  shift;
+
+	ret = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_RESET_CONTROL, &word);
+	if (ret < 0) {
+		ERROR("failed to read rshim reset control error %d", ret);
+		return ret;
+	}
+
+	val = RSH_RESET_CONTROL__RESET_CHIP_VAL_KEY;
+	shift = RSH_RESET_CONTROL__RESET_CHIP_SHIFT;
+	word &= ~((u64) RSH_RESET_CONTROL__RESET_CHIP_MASK);
+	word |= (val << shift);
+
+	/*
+	 * The reset of the ARM can be blocked when the DISABLED bit
+	 * is set. The big assumption is that the DISABLED bit would
+	 * be hold high for a short period and only the platform code
+	 * can reset that bit. Thus the ARM reset can be delayed and
+	 * in theory this should not impact the behavior of the RShim
+	 * driver.
+	 */
+	ret = bd->write_rshim(bd, RSHIM_CHANNEL, RSH_RESET_CONTROL, word);
+	if (ret < 0) {
+		ERROR("failed to write rshim reset control error %d", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
 /* Boot file operations routines */
 
 /*
@@ -507,19 +549,8 @@ static ssize_t rshim_boot_write(struct file *file, const char *user_buffer,
 			      size_t count, loff_t *ppos)
 {
 	struct rshim_backend *bd = file->private_data;
-	int retval = 0, whichbuf = 0;
-	size_t bytes_written = 0, bytes_left;
-
-	/*
-	 * Hardware requires that we send multiples of 8 bytes.  Ideally
-	 * we'd handle the case where we got unaligned writes by
-	 * accumulating the residue somehow, but none of our clients
-	 * typically do this, so we just clip the size to prevent any
-	 * inadvertent errors from causing hardware problems.
-	 */
-	bytes_left = count & (-((size_t)8));
-	if (!bytes_left)
-		return 0;
+	int retval = 0, whichbuf = 0, len;
+	size_t bytes_written = 0;
 
 	mutex_lock(&bd->mutex);
 	if (bd->is_in_boot_write) {
@@ -541,22 +572,32 @@ static ssize_t rshim_boot_write(struct file *file, const char *user_buffer,
 	 */
 	bd->is_in_boot_write = 1;
 
-	while (bytes_left) {
-		size_t buf_bytes = min((size_t)BOOT_BUF_SIZE, bytes_left);
+	/* Loop as long as there is 8 bytes (minimum size for rshim write). */
+	while (count + bd->boot_rem_cnt >= sizeof(u64)) {
+		size_t buf_bytes = min((size_t)BOOT_BUF_SIZE,
+				(count + bd->boot_rem_cnt) & (-((size_t)8)));
 		char *buf = bd->boot_buf[whichbuf];
 
 		whichbuf ^= 1;
-		if (copy_from_user(buf, user_buffer, buf_bytes)) {
+
+		/* Copy the previous remaining data first. */
+		if (bd->boot_rem_cnt)
+			memcpy(buf, &bd->boot_rem_data, bd->boot_rem_cnt);
+
+		if (copy_from_user(buf + bd->boot_rem_cnt, user_buffer,
+				   buf_bytes - bd->boot_rem_cnt)) {
 			retval = -EFAULT;
 			pr_err("boot_write: copy from user failed\n");
 			break;
 		}
 
 		retval = bd->write(bd, RSH_DEV_TYPE_BOOT, buf, buf_bytes);
-		if (retval > 0) {
-			bytes_left -= retval;
-			user_buffer += retval;
-			bytes_written += retval;
+		if (retval > bd->boot_rem_cnt) {
+			len = retval - bd->boot_rem_cnt;
+			count -= len;
+			user_buffer += len;
+			bytes_written += len;
+			bd->boot_rem_cnt = 0;
 		} else if (retval == 0) {
 			/* Wait for some time instead of busy polling. */
 			msleep_interruptible(1);
@@ -570,16 +611,17 @@ static ssize_t rshim_boot_write(struct file *file, const char *user_buffer,
 			break;
 	}
 
+	/* Buffer the remaining data. */
+	if (count + bd->boot_rem_cnt < sizeof(bd->boot_rem_data)) {
+		if (copy_from_user((u8*)&bd->boot_rem_data + bd->boot_rem_cnt,
+				   user_buffer, count))
+			return -EFAULT;
+		bd->boot_rem_cnt += count;
+		bytes_written += count;
+	}
+
 	bd->is_in_boot_write = 0;
 	mutex_unlock(&bd->mutex);
-
-	/*
-	 * Return an error in case the 'count' is not multiple of 8 bytes.
-	 * At this moment, the truncated data has already been sent to
-	 * the BOOT fifo and hopefully it could still boot the chip.
-	 */
-	if (count % 8 != 0)
-		return -EINVAL;
 
 	return bytes_written ? bytes_written : retval;
 }
@@ -598,6 +640,13 @@ static int rshim_boot_release(struct inode *inode, struct file *file)
 		ERROR("couldn't set boot_control, err %d", retval);
 
 	mutex_lock(&bd->mutex);
+	/* Flush the leftover data with zeros padded. */
+	if (bd->boot_rem_cnt) {
+		memset((u8*)&bd->boot_rem_data + bd->boot_rem_cnt, 0,
+		       sizeof(u64) - bd->boot_rem_cnt);
+		bd->write_rshim(bd, RSHIM_CHANNEL, RSH_BOOT_FIFO_DATA,
+				bd->boot_rem_data);
+	}
 	bd->is_boot_open = 0;
 	queue_delayed_work(rshim_wq, &bd->work, HZ);
 	mutex_unlock(&bd->mutex);
@@ -664,6 +713,7 @@ int rshim_boot_open(struct file *file)
 	pr_info("begin booting\n");
 	reinit_completion(&bd->booting_complete);
 	bd->is_booting = 1;
+	bd->boot_rem_cnt = 0;
 
 	/*
 	 * Before we reset the chip, make sure we don't have any
@@ -729,9 +779,15 @@ int rshim_boot_open(struct file *file)
 
 	bd->is_boot_open = 1;
 
+	/*
+	 * Disable the watchdog. The channel and offset are the same on all
+	 * the BlueField SoC so far.
+	 */
+	bd->write_rshim(bd, RSH_MMIO_ADDRESS_SPACE__CHANNEL_VAL_WDOG1,
+			RSH_ARM_WDG_CONTROL_WCS, 0);
+
 	/* SW reset. */
-	retval = bd->write_rshim(bd, RSHIM_CHANNEL, RSH_RESET_CONTROL,
-				 RSH_RESET_CONTROL__RESET_CHIP_VAL_KEY);
+	retval = rshim_write_reset_control(bd);
 
 	/* Reset the TmFifo. */
 	rshim_fifo_reset(bd);
@@ -792,7 +848,7 @@ int rshim_boot_open(struct file *file)
 	 */
 	retval = wait_for_completion_interruptible_timeout(&bd->reset_complete,
 							   5 * HZ);
-	if (retval == 0)
+	if (retval == 0 && bd->has_reprobe)
 		ERROR("timed out waiting for device reprobe after reset");
 
 	while (devs_locked) {
@@ -914,6 +970,10 @@ static void rshim_fifo_ctrl_rx(struct rshim_backend *bd,
 	case TMFIFO_MSG_MAC_2:
 		memcpy(bd->peer_mac + 3, hdr->mac, 3);
 		break;
+	case TMFIFO_MSG_VLAN_ID:
+		bd->vlan[0] = ntohs(hdr->vlan[0]);
+		bd->vlan[1] = ntohs(hdr->vlan[1]);
+		break;
 	case TMFIFO_MSG_PXE_ID:
 		bd->pxe_client_id = ntohl(hdr->pxe_id);
 		/* Last info to receive, set the flag. */
@@ -948,6 +1008,15 @@ static int rshim_fifo_ctrl_tx(struct rshim_backend *bd)
 		hdr.data = 0;
 		hdr.type = TMFIFO_MSG_PXE_ID;
 		hdr.pxe_id = htonl(bd->pxe_client_id);
+		rshim_fifo_ctrl_update_checksum(&hdr);
+		memcpy(bd->write_buf, &hdr.data, sizeof(hdr.data));
+		len = sizeof(hdr.data);
+	} else if (bd->peer_vlan_set) {
+		bd->peer_vlan_set = 0;
+		hdr.data = 0;
+		hdr.type = TMFIFO_MSG_VLAN_ID;
+		hdr.vlan[0] = htons(bd->vlan[0]);
+		hdr.vlan[1] = htons(bd->vlan[1]);
 		rshim_fifo_ctrl_update_checksum(&hdr);
 		memcpy(bd->write_buf, &hdr.data, sizeof(hdr.data));
 		len = sizeof(hdr.data);
@@ -2111,6 +2180,362 @@ static int rshim_rshim_open(struct file *file)
 
 /* Misc file operations routines */
 
+/*
+ * Logging over rshim misc file.
+ */
+/* Log module */
+const char * const rshim_log_mod[] = {
+	"others", "BL1", "BL2", "BL2R", "BL31", "UEFI"
+};
+
+/* Log level */
+const char * const rshim_log_level[] = { "INFO", "WARN", "ERR", "ASSERT" };
+
+/* Log type. */
+#define BF_RSH_LOG_TYPE_UNKNOWN         0x00ULL
+#define BF_RSH_LOG_TYPE_PANIC           0x01ULL
+#define BF_RSH_LOG_TYPE_EXCEPTION       0x02ULL
+#define BF_RSH_LOG_TYPE_UNUSED          0x03ULL
+#define BF_RSH_LOG_TYPE_MSG             0x04ULL
+
+/* Utility macro. */
+#define BF_RSH_LOG_MOD_MASK             0x0FULL
+#define BF_RSH_LOG_MOD_SHIFT            60
+#define BF_RSH_LOG_TYPE_MASK            0x0FULL
+#define BF_RSH_LOG_TYPE_SHIFT           56
+#define BF_RSH_LOG_LEN_MASK             0x7FULL
+#define BF_RSH_LOG_LEN_SHIFT            48
+#define BF_RSH_LOG_ARG_MASK             0xFFFFFFFFULL
+#define BF_RSH_LOG_ARG_SHIFT            16
+#define BF_RSH_LOG_HAS_ARG_MASK         0xFFULL
+#define BF_RSH_LOG_HAS_ARG_SHIFT        8
+#define BF_RSH_LOG_LEVEL_MASK           0xFFULL
+#define BF_RSH_LOG_LEVEL_SHIFT          0
+#define BF_RSH_LOG_PC_MASK              0xFFFFFFFFULL
+#define BF_RSH_LOG_PC_SHIFT             0
+#define BF_RSH_LOG_SYNDROME_MASK        0xFFFFFFFFULL
+#define BF_RSH_LOG_SYNDROME_SHIFT       0
+
+#define BF_RSH_LOG_HEADER_GET(f, h) \
+	(((h) >> BF_RSH_LOG_##f##_SHIFT) & BF_RSH_LOG_##f##_MASK)
+
+#define AARCH64_MRS_REG_SHIFT	5
+#define AARCH64_MRS_REG_MASK	0xffff
+
+struct rshim_log_reg {
+	char *name;
+	u32 opcode;
+};
+
+static struct rshim_log_reg rshim_log_regs[] = {
+	{"actlr_el1",		0b1100000010000001},
+	{"actlr_el2",		0b1110000010000001},
+	{"actlr_el3",		0b1111000010000001},
+	{"afsr0_el1",		0b1100001010001000},
+	{"afsr0_el2",		0b1110001010001000},
+	{"afsr0_el3",		0b1111001010001000},
+	{"afsr1_el1",		0b1100001010001001},
+	{"afsr1_el2",		0b1110001010001001},
+	{"afsr1_el3",		0b1111001010001001},
+	{"amair_el1",		0b1100010100011000},
+	{"amair_el2",		0b1110010100011000},
+	{"amair_el3",		0b1111010100011000},
+	{"ccsidr_el1",		0b1100100000000000},
+	{"clidr_el1",		0b1100100000000001},
+	{"cntkctl_el1",		0b1100011100001000},
+	{"cntp_ctl_el0",	0b1101111100010001},
+	{"cntp_cval_el0",	0b1101111100010010},
+	{"cntv_ctl_el0",	0b1101111100011001},
+	{"cntv_cval_el0",	0b1101111100011010},
+	{"contextidr_el1",	0b1100011010000001},
+	{"cpacr_el1",		0b1100000010000010},
+	{"cptr_el2",		0b1110000010001010},
+	{"cptr_el3",		0b1111000010001010},
+	{"vtcr_el2",		0b1110000100001010},
+	{"ctr_el0",		0b1101100000000001},
+	{"currentel",		0b1100001000010010},
+	{"dacr32_el2",		0b1110000110000000},
+	{"daif",		0b1101101000010001},
+	{"dczid_el0",		0b1101100000000111},
+	{"dlr_el0",		0b1101101000101001},
+	{"dspsr_el0",		0b1101101000101000},
+	{"elr_el1",		0b1100001000000001},
+	{"elr_el2",		0b1110001000000001},
+	{"elr_el3",		0b1111001000000001},
+	{"esr_el1",		0b1100001010010000},
+	{"esr_el2",		0b1110001010010000},
+	{"esr_el3",		0b1111001010010000},
+	{"esselr_el1",		0b1101000000000000},
+	{"far_el1",		0b1100001100000000},
+	{"far_el2",		0b1110001100000000},
+	{"far_el3",		0b1111001100000000},
+	{"fpcr",		0b1101101000100000},
+	{"fpexc32_el2",		0b1110001010011000},
+	{"fpsr",		0b1101101000100001},
+	{"hacr_el2",		0b1110000010001111},
+	{"har_el2",		0b1110000010001000},
+	{"hpfar_el2",		0b1110001100000100},
+	{"hstr_el2",		0b1110000010001011},
+	{"far_el1",		0b1100001100000000},
+	{"far_el2",		0b1110001100000000},
+	{"far_el3",		0b1111001100000000},
+	{"hcr_el2",		0b1110000010001000},
+	{"hpfar_el2",		0b1110001100000100},
+	{"id_aa64afr0_el1",	0b1100000000101100},
+	{"id_aa64afr1_el1",	0b1100000000101101},
+	{"id_aa64dfr0_el1",	0b1100000000101100},
+	{"id_aa64isar0_el1",	0b1100000000110000},
+	{"id_aa64isar1_el1",	0b1100000000110001},
+	{"id_aa64mmfr0_el1",	0b1100000000111000},
+	{"id_aa64mmfr1_el1",	0b1100000000111001},
+	{"id_aa64pfr0_el1",	0b1100000000100000},
+	{"id_aa64pfr1_el1",	0b1100000000100001},
+	{"ifsr32_el2",		0b1110001010000001},
+	{"isr_el1",		0b1100011000001000},
+	{"mair_el1",		0b1100010100010000},
+	{"mair_el2",		0b1110010100010000},
+	{"mair_el3",		0b1111010100010000},
+	{"midr_el1",		0b1100000000000000},
+	{"mpidr_el1",		0b1100000000000101},
+	{"nzcv",		0b1101101000010000},
+	{"revidr_el1",		0b1100000000000110},
+	{"rmr_el3",		0b1111011000000010},
+	{"par_el1",		0b1100001110100000},
+	{"rvbar_el3",		0b1111011000000001},
+	{"scr_el3",		0b1111000010001000},
+	{"sctlr_el1",		0b1100000010000000},
+	{"sctlr_el2",		0b1110000010000000},
+	{"sctlr_el3",		0b1111000010000000},
+	{"sp_el0",		0b1100001000001000},
+	{"sp_el1",		0b1110001000001000},
+	{"spsel",		0b1100001000010000},
+	{"spsr_abt",		0b1110001000011001},
+	{"spsr_el1",		0b1100001000000000},
+	{"spsr_el2",		0b1110001000000000},
+	{"spsr_el3",		0b1111001000000000},
+	{"spsr_fiq",		0b1110001000011011},
+	{"spsr_irq",		0b1110001000011000},
+	{"spsr_und",		0b1110001000011010},
+	{"tcr_el1",		0b1100000100000010},
+	{"tcr_el2",		0b1110000100000010},
+	{"tcr_el3",		0b1111000100000010},
+	{"tpidr_el0",		0b1101111010000010},
+	{"tpidr_el1",		0b1100011010000100},
+	{"tpidr_el2",		0b1110011010000010},
+	{"tpidr_el3",		0b1111011010000010},
+	{"tpidpro_el0",		0b1101111010000011},
+	{"vbar_el1",		0b1100011000000000},
+	{"vbar_el2",		0b1110011000000000},
+	{"vbar_el3",		0b1111011000000000},
+	{"vmpidr_el2",		0b1110000000000101},
+	{"vpidr_el2",		0b1110000000000000},
+	{"ttbr0_el1",		0b1100000100000000},
+	{"ttbr0_el2",		0b1110000100000000},
+	{"ttbr0_el3",		0b1111000100000000},
+	{"ttbr1_el1",		0b1100000100000001},
+	{"vtcr_el2",		0b1110000100001010},
+	{"vttbr_el2",		0b1110000100001000},
+	{NULL,			0b0000000000000000},
+};
+
+static char * rshim_log_get_reg_name(u64 opcode)
+{
+	struct rshim_log_reg *reg = rshim_log_regs;
+
+	while (reg->name) {
+		if (reg->opcode == opcode)
+			return reg->name;
+		reg++;
+	}
+
+	return "unknown";
+}
+
+static int rshim_misc_show_crash(struct rshim_backend *bd, u64 hdr,
+				 struct seq_file *s)
+{
+	int retval = 0, i, module, type, len;
+	u64 opcode, data;
+	u32 pc, syndrome, ec;
+
+	module = BF_RSH_LOG_HEADER_GET(MOD, hdr);
+	if (module >= ARRAY_SIZE(rshim_log_mod))
+		module = 0;
+	type = BF_RSH_LOG_HEADER_GET(TYPE, hdr);
+	len = BF_RSH_LOG_HEADER_GET(LEN, hdr);
+
+	if (type == BF_RSH_LOG_TYPE_EXCEPTION) {
+		syndrome = BF_RSH_LOG_HEADER_GET(SYNDROME, hdr);
+		ec = syndrome >> 26;
+		seq_printf(s, " Exception(%s): syndrome = 0x%x%s\n",
+			   rshim_log_mod[module], syndrome,
+			   (ec == 0x24 || ec == 0x25) ? "(Data Abort)" :
+			   (ec == 0x2f) ? "(SError)" : "");
+	}
+	else if (type == BF_RSH_LOG_TYPE_PANIC) {
+		pc = BF_RSH_LOG_HEADER_GET(PC, hdr);
+		seq_printf(s, " PANIC(%s): PC = 0x%x\n", rshim_log_mod[module],
+			   pc);
+	}
+
+	for (i = 0; i < len/2; i++) {
+		retval = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_SCRATCH_BUF_DAT,
+					&opcode);
+		if (retval)
+			break;
+
+		retval = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_SCRATCH_BUF_DAT,
+					&data);
+		if (retval)
+			break;
+
+		opcode = (le64_to_cpu(opcode) >> AARCH64_MRS_REG_SHIFT) &
+			 AARCH64_MRS_REG_MASK;
+		seq_printf(s, "   %-16s0x%llx\n", rshim_log_get_reg_name(opcode),
+			   data);
+	}
+
+	return retval;
+}
+
+static int rshim_misc_show_msg(struct rshim_backend *bd, u64 hdr,
+			       struct seq_file *s)
+{
+	int retval;
+	int module = BF_RSH_LOG_HEADER_GET(MOD, hdr);
+	int len = BF_RSH_LOG_HEADER_GET(LEN, hdr);
+	int level = BF_RSH_LOG_HEADER_GET(LEVEL, hdr);
+	int has_arg = BF_RSH_LOG_HEADER_GET(HAS_ARG, hdr);
+	u32 arg = BF_RSH_LOG_HEADER_GET(ARG, hdr);
+	u64 data;
+	char *buf, *p;
+
+	if (len <= 0)
+		return -EINVAL;
+
+	if (module >= ARRAY_SIZE(rshim_log_mod))
+		module = 0;
+	if (level >= ARRAY_SIZE(rshim_log_level))
+		level = 0;
+
+	buf = kmalloc(len * sizeof(uint64_t) + 1, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+	p = buf;
+
+	while (len--) {
+		retval = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_SCRATCH_BUF_DAT,
+					&data);
+		if (retval)
+			return retval;
+		memcpy(p, &data, sizeof(data));
+		p += sizeof(data);
+	}
+	*p = '\0';
+	if (!has_arg) {
+		seq_printf(s, " %s[%s]: %s\n", rshim_log_level[level],
+			   rshim_log_mod[module], buf);
+	} else {
+		seq_printf(s, " %s[%s]: ", rshim_log_level[level],
+			   rshim_log_mod[module]);
+		seq_printf(s, buf, arg);
+		seq_printf(s, "\n");
+	}
+
+	kfree(buf);
+	return 0;
+}
+
+static int rshim_misc_show_log(struct rshim_backend *bd, struct seq_file *s)
+{
+	int i, retval, type, len;
+	u64 data, idx, hdr;
+
+	seq_printf(s, "---------------------------------------\n");
+	seq_printf(s, "             Log Messages\n");
+	seq_printf(s, "---------------------------------------\n");
+
+	/* Take the semaphore. */
+	while (true) {
+		mutex_lock(&bd->mutex);
+		retval = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_SEMAPHORE0, &data);
+		mutex_unlock(&bd->mutex);
+		if (retval) {
+			ERROR("couldn't read RSH_SEMAPHORE0");
+			return retval;
+		}
+
+		if (!data)
+			break;
+
+		if (msleep_interruptible(10))
+			return -EINTR;
+	}
+
+	mutex_lock(&bd->mutex);
+
+	/* Read the current index. */
+	retval = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_SCRATCH_BUF_CTL, &idx);
+	if (retval) {
+		ERROR("couldn't read RSH_SCRATCH_BUF_CTL");
+		goto done;
+	}
+	idx = (idx >> RSH_SCRATCH_BUF_CTL__IDX_SHIFT) &
+		RSH_SCRATCH_BUF_CTL__IDX_MASK;
+	if (idx <= 1)
+		goto done;
+
+	/* Reset the index to 0. */
+	retval = bd->write_rshim(bd, RSHIM_CHANNEL, RSH_SCRATCH_BUF_CTL, 0);
+	if (retval) {
+		ERROR("couldn't write RSH_SCRATCH_BUF_CTL");
+		goto done;
+	}
+
+	i = 0;
+	while (i < idx) {
+		retval = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_SCRATCH_BUF_DAT,
+					&hdr);
+		if (retval) {
+			ERROR("couldn't read RSH_SCRATCH_BUF_DAT");
+			goto done;
+		}
+		hdr = le64_to_cpu(hdr);
+		type = BF_RSH_LOG_HEADER_GET(TYPE, hdr);
+		len = BF_RSH_LOG_HEADER_GET(LEN, hdr);
+		i += 1 + len;
+		/* Ignore if wraparounded. */
+		if (i > idx)
+			break;
+
+		switch (type) {
+		case BF_RSH_LOG_TYPE_PANIC:
+		case BF_RSH_LOG_TYPE_EXCEPTION:
+			rshim_misc_show_crash(bd, hdr, s);
+			break;
+		case BF_RSH_LOG_TYPE_MSG:
+			rshim_misc_show_msg(bd, hdr, s);
+			break;
+		default:
+			/* Drain this message. */
+			while (len--)
+				bd->read_rshim(bd, RSHIM_CHANNEL,
+					       RSH_SCRATCH_BUF_DAT, &data);
+			break;
+		}
+	}
+
+	/* Restore the idx value. */
+	bd->write_rshim(bd, RSHIM_CHANNEL, RSH_SCRATCH_BUF_CTL, idx);
+
+done:
+	/* Release the semaphore. */
+	bd->write_rshim(bd, RSHIM_CHANNEL, RSH_SEMAPHORE0, 0);
+	mutex_unlock(&bd->mutex);
+
+	return retval;
+}
+
 static int
 rshim_misc_seq_show(struct seq_file *s, void *token)
 {
@@ -2121,41 +2546,53 @@ rshim_misc_seq_show(struct seq_file *s, void *token)
 
 	/* Boot mode. */
 	mutex_lock(&bd->mutex);
-	retval = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_BOOT_CONTROL,
-				&value);
+	retval = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_BOOT_CONTROL, &value);
 	mutex_unlock(&bd->mutex);
 	if (retval) {
 		ERROR("couldn't read rshim register");
 		return retval;
 	}
-	seq_printf(s, "BOOT_MODE %lld\n",
-		   value & RSH_BOOT_CONTROL__BOOT_MODE_MASK);
+
+	/* Display level. */
+	seq_printf(s, "%-16s%d (0:basic, 1:advanced, 2:log)\n",
+		   "DISPLAY_LEVEL", rshim_misc_level);
+
+	seq_printf(s, "%-16s%lld (0:rshim, 1:emmc, 2:emmc-boot-swap)\n",
+		   "BOOT_MODE", value & RSH_BOOT_CONTROL__BOOT_MODE_MASK);
+
+	seq_printf(s, "%-16s%d (seconds)\n", "BOOT_TIMEOUT",
+		   rshim_boot_timeout);
 
 	/* SW reset flag is always 0. */
-	seq_printf(s, "SW_RESET  %d\n", 0);
+	seq_printf(s, "%-16s%d (1: reset)\n", "SW_RESET", 0);
 
 	/* Display the driver name. */
-	seq_printf(s, "DRV_NAME  %s\n", bd->owner->name);
+	seq_printf(s, "%-16s%s (ro)\n", "DEV_NAME", bd->dev_name);
 
-	/* The rest are advanced options. */
-	if (!rshim_adv_cfg)
-		return 0;
-
-	/*
-	 * Display the target-side information. Send a request and wait for
-	 * some time for the response.
-	 */
-	mutex_lock(&bd->mutex);
-	bd->peer_ctrl_req = 1;
-	bd->peer_ctrl_resp = 0;
-	memset(mac, 0, 6);
-	bd->has_cons_work = 1;
-	mutex_unlock(&bd->mutex);
-	queue_delayed_work(rshim_wq, &bd->work, 0);
-	wait_event_interruptible_timeout(bd->ctrl_wait, bd->peer_ctrl_resp, HZ);
-	seq_printf(s, "PEER_MAC  %02x:%02x:%02x:%02x:%02x:%02x\n",
-		   mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-	seq_printf(s, "PXE_ID    0x%08x\n", htonl(bd->pxe_client_id));
+	if (rshim_misc_level == 1) {
+		/*
+		 * Display the target-side information. Send a request and wait
+		 * for some time for the response.
+		 */
+		mutex_lock(&bd->mutex);
+		bd->peer_ctrl_req = 1;
+		bd->peer_ctrl_resp = 0;
+		memset(mac, 0, 6);
+		bd->has_cons_work = 1;
+		mutex_unlock(&bd->mutex);
+		queue_delayed_work(rshim_wq, &bd->work, 0);
+		wait_event_interruptible_timeout(bd->ctrl_wait,
+						 bd->peer_ctrl_resp, HZ);
+		seq_printf(s, "%-16s%02x:%02x:%02x:%02x:%02x:%02x (rw)\n",
+			   "PEER_MAC",
+			   mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+		seq_printf(s, "%-16s0x%08x (rw)\n", "PXE_ID",
+			   htonl(bd->pxe_client_id));
+		seq_printf(s, "%-16s%d %d (rw)\n", "VLAN_ID", bd->vlan[0],
+			   bd->vlan[1]);
+	} else if (rshim_misc_level == 2) {
+		rshim_misc_show_log(bd, s);
+	}
 
 	return 0;
 }
@@ -2164,7 +2601,7 @@ static ssize_t rshim_misc_write(struct file *file, const char *user_buffer,
 				size_t count, loff_t *ppos)
 {
 	struct rshim_backend *bd;
-	int i, retval = 0, value, mac[6];
+	int i, retval = 0, value, mac[6], vlan[2] = { 0 };
 	char buf[64], key[32], *p = buf;
 
 	if (*ppos != 0 || count >= sizeof(buf))
@@ -2181,7 +2618,15 @@ static ssize_t rshim_misc_write(struct file *file, const char *user_buffer,
 
 	bd = ((struct seq_file *)file->private_data)->private;
 
-	if (strcmp(key, "BOOT_MODE") == 0) {
+	if (strcmp(key, "DISPLAY_LEVEL") == 0) {
+		if (sscanf(p, "%d", &value) != 1)
+			return -EINVAL;
+		rshim_misc_level = value;
+	} else if (strcmp(key, "BOOT_TIMEOUT") == 0) {
+		if (sscanf(p, "%d", &value) != 1)
+			return -EINVAL;
+		rshim_boot_timeout = value;
+	} else if (strcmp(key, "BOOT_MODE") == 0) {
 		if (sscanf(p, "%x", &value) != 1)
 			return -EINVAL;
 		retval = bd->write_rshim(bd, RSHIM_CHANNEL, RSH_BOOT_CONTROL,
@@ -2200,9 +2645,8 @@ static ssize_t rshim_misc_write(struct file *file, const char *user_buffer,
 				mutex_unlock(&bd->mutex);
 			}
 
-			retval = bd->write_rshim(bd, RSHIM_CHANNEL,
-					RSH_RESET_CONTROL,
-					RSH_RESET_CONTROL__RESET_CHIP_VAL_KEY);
+			/* SW reset. */
+			retval = rshim_write_reset_control(bd);
 
 			if (!bd->has_reprobe) {
 				/* Attach. */
@@ -2229,6 +2673,16 @@ static ssize_t rshim_misc_write(struct file *file, const char *user_buffer,
 		mutex_lock(&bd->mutex);
 		bd->pxe_client_id = ntohl(value);
 		bd->peer_pxe_id_set = 1;
+		bd->has_cons_work = 1;
+		queue_delayed_work(rshim_wq, &bd->work, 0);
+		mutex_unlock(&bd->mutex);
+	} else if (strcmp(key, "VLAN_ID") == 0) {
+		if (sscanf(p, "%d %d", &vlan[0], &vlan[1]) > 2)
+			return -EINVAL;
+		mutex_lock(&bd->mutex);
+		bd->vlan[0] = vlan[0];
+		bd->vlan[1] = vlan[1];
+		bd->peer_vlan_set = 1;
 		bd->has_cons_work = 1;
 		queue_delayed_work(rshim_wq, &bd->work, 0);
 		mutex_unlock(&bd->mutex);
@@ -2554,11 +3008,73 @@ rshim_load_modules(struct work_struct *work)
 
 static DECLARE_DELAYED_WORK(rshim_load_modules_work, rshim_load_modules);
 
+/*
+ * For some SmartNIC cards with UART connected to the same RSim host, the
+ * BOO_MODE comes up with 0 after power-cycle thus not able to boot from eMMC.
+ * This function provides a workaround to detect such case and reset the card
+ * with the correct boot mode.
+ */
+static void rshim_boot_workaround_check(struct rshim_backend *bd)
+{
+	int retval;
+	u64 value, uptime_sw, uptime_hw;
+
+	/* Check boot mode 0, which supposes to be set externally. */
+	retval = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_BOOT_CONTROL, &value);
+	if (retval || value != RSH_BOOT_CONTROL__BOOT_MODE_VAL_NONE)
+		return;
+
+	/*
+	 * The logic below detects whether it's a hard reset. Register
+	 * RSH_UPTIME_POR has the value of cycles since hw reset, register
+	 * RSH_UPTIME has value of the most recent reset (sw or hard reset).
+	 * If the gap between these two values is less than 1G, we treat it
+	 * as hard reset.
+	 *
+	 * If boot mode is 0 after hard-reset, we update the boot mode and
+	 * initiate sw reset so the chip could boot up.
+	 */
+	retval = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_UPTIME_POR, &uptime_hw);
+	if (retval)
+		return;
+
+	retval = bd->read_rshim(bd, RSHIM_CHANNEL, RSH_UPTIME, &uptime_sw);
+	if (retval)
+		return;
+
+	if (uptime_sw - uptime_hw < 1000000000ULL) {
+		retval = bd->write_rshim(bd, RSHIM_CHANNEL,
+					 RSH_BOOT_CONTROL,
+					 RSH_BOOT_CONTROL__BOOT_MODE_VAL_EMMC);
+		if (!retval) {
+			/* SW reset. */
+			retval = rshim_write_reset_control(bd);
+			msleep(100);
+		}
+	}
+}
+
 /* Check whether backend is allowed to register or not. */
 static int rshim_access_check(struct rshim_backend *bd)
 {
 	int i, retval;
 	u64 value;
+
+	/*
+	 * Add a check and delay to make sure rshim is ready.
+	 * It's mainly used in BlueField2+ where the rshim (like USB) access is
+	 * enabled in boot ROM which might happen after external host detects
+	 * the rshim device.
+	 */
+	for (i = 0; i < 10; i++) {
+		retval = bd->read_rshim(bd, RSHIM_CHANNEL,
+					RSH_TM_HOST_TO_TILE_CTL, &value);
+		if (!retval && value)
+			break;
+		msleep(100);
+	}
+
+	rshim_boot_workaround_check(bd);
 
 	/* Write value 0 to RSH_SCRATCHPAD1. */
 	retval = bd->write_rshim(bd, RSHIM_CHANNEL, RSH_SCRATCHPAD1, 0);
@@ -2734,7 +3250,7 @@ int rshim_register(struct rshim_backend *bd)
 	bd->last_keepalive = jiffies;
 	mod_timer(&bd->timer, jiffies + 1);
 
-	schedule_delayed_work(&rshim_load_modules_work, 3 * HZ);
+	schedule_delayed_work(&rshim_load_modules_work, 10 * HZ);
 
 	return 0;
 }
@@ -2890,7 +3406,13 @@ static int __init rshim_init(void)
 		goto error;
 	}
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 36)
 	rshim_wq = create_workqueue("rshim");
+#else
+	rshim_wq = alloc_workqueue("rshim",
+				   WQ_MEM_RECLAIM | WQ_FREEZABLE | WQ_UNBOUND,
+				   0);
+#endif
 	if (!rshim_wq) {
 		result = -ENOMEM;
 		goto error;
@@ -2941,4 +3463,4 @@ module_exit(rshim_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Mellanox Technologies");
-MODULE_VERSION("0.16");
+MODULE_VERSION("0.25");

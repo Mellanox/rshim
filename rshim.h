@@ -90,6 +90,7 @@ enum {
 
 /* Internal message types in addition to the standard VIRTIO_ID_xxx types. */
 enum {
+	TMFIFO_MSG_VLAN_ID = 0xFB,	/* vlan id */
 	TMFIFO_MSG_PXE_ID = 0xFC,	/* pxe client identifier */
 	TMFIFO_MSG_CTRL_REQ = 0xFD,	/* ctrl request */
 	TMFIFO_MSG_MAC_1 = 0xFE,	/* mac[0:2] */
@@ -104,6 +105,7 @@ union rshim_tmfifo_msg_hdr {
 		union {
 			u8 mac[3];	/* 3-bytes of the MAC address */
 			__be32 pxe_id;	/* pxe identifier */
+			__be16 vlan[2];	/* up to two vlan id */
 		} __packed;
 		u8 checksum;		/* header checksum */
 	} __packed;
@@ -120,17 +122,22 @@ enum {
 /* Various rshim definitions. */
 #define RSH_INT_VEC0_RTC__SWINT3_MASK 0x8
 
-#define RSH_BYTE_ACC_READ_TRIGGER 0x50000000
-#define RSH_BYTE_ACC_SIZE 0x10000000
-#define RSH_BYTE_ACC_PENDING 0x20000000
-
+#define RSH_BYTE_ACC_READ_TRIGGER 0x50
+#define RSH_BYTE_ACC_SIZE_4BYTE 0x10
+#define RSH_BYTE_ACC_PENDING 0x20
 
 #define BOOT_CHANNEL        RSH_MMIO_ADDRESS_SPACE__CHANNEL_VAL_BOOT
 #define RSHIM_CHANNEL       RSH_MMIO_ADDRESS_SPACE__CHANNEL_VAL_RSHIM
 #define UART0_CHANNEL       RSH_MMIO_ADDRESS_SPACE__CHANNEL_VAL_UART0
 #define UART1_CHANNEL       RSH_MMIO_ADDRESS_SPACE__CHANNEL_VAL_UART1
 
+/* Base RShim Address */
+#define RSH_BASE_ADDR 0x80000000
+#define RSH_CHANNEL_BASE(chan) (RSH_BASE_ADDR | (chan << 16))
+
 #define RSH_BOOT_FIFO_SIZE   512
+
+#define LOCK_RETRY_CNT 100000
 
 /* FIFO structure. */
 struct rshim_fifo {
@@ -187,6 +194,7 @@ struct rshim_backend {
 	u32 peer_ctrl_resp : 1;    /* A flag to indicate MAC response rcvd. */
 	u32 peer_mac_set : 1;      /* A flag to send MAC-set request. */
 	u32 peer_pxe_id_set : 1;   /* A flag to send pxe-id-set request. */
+	u32 peer_vlan_set : 1;     /* A flag to set vlan IDs. */
 
 	/* Jiffies of last keepalive. */
 	u64 last_keepalive;
@@ -234,6 +242,10 @@ struct rshim_backend {
 
 	/* Buffers used for boot writes.  Allocated at startup. */
 	char *boot_buf[2];
+
+	/* Buffer to store the remaining data when it's not 8B unaligned. */
+	u8 boot_rem_cnt;
+	u64 boot_rem_data;
 
 	/*
 	 * This mutex is used to prevent the interface pointers and the
@@ -309,6 +321,9 @@ struct rshim_backend {
 
 	/* Configured PXE client identifier. */
 	u32 pxe_client_id;
+
+	/* Up to two VLAN IDs for PXE purpose. */
+	u16 vlan[2];
 
 	/* APIs provided by backend. */
 
