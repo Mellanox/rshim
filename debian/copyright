@@ -1,7 +1,7 @@
 Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 
 Files: *
-Copyright: Copyright 2017 Mellanox Technologies <support@mellanox.com>
+Copyright: Copyright (c) 2020 NVIDIA Corporation <support@mellanox.com>
 License: GPL-2
  Software distributed under the terms of the GNU General Public License ("GPL") version 2 as published by the Free Software Foundation.
  *

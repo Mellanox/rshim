@@ -1,15 +1,6 @@
+/* SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0-only */
 /*
- * Copyright 2017 Mellanox Technologies. All Rights Reserved.
- *
- *   This program is free software; you can redistribute it and/or
- *   modify it under the terms of the GNU General Public License
- *   as published by the Free Software Foundation, version 2.
- *
- *   This program is distributed in the hope that it will be useful, but
- *   WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
- *   NON INFRINGEMENT.  See the GNU General Public License for
- *   more details.
+ * Copyright (c) 2020 NVIDIA Corporation. All rights reserved.
  */
 
 #ifndef _RSHIM_H

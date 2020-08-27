@@ -1,3 +1,21 @@
+rshim (1.24-0) unstable; urgency=low
+
+  * rshim driver: update the license info.
+
+ --  Liming Sun <lsun@mellanox.com>  Wed, 26 Aug 2020 15:42:32 +0200
+
+rshim (1.23-0) unstable; urgency=low
+
+  * rshim driver: fix another race condition during fw reset
+
+ --  Liming Sun <lsun@mellanox.com>  Fri, 31 Jul 2020 10:55:30 +0200
+
+rshim (1.22-0) unstable; urgency=low
+
+  * rshim driver: increase timeout for SW_RESET over rshim_pcie
+
+ --  Shravan Ramani <sramani@mellanox.com>  Tue, 19 May 2020 08:13:29 -0400
+
 rshim (1.21-0) unstable; urgency=low
 
   * rshim driver: fix race condition during fw reset

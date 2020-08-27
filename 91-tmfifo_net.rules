@@ -5,3 +5,11 @@ SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="00:1a:ca:ff:ff:04", ATTR{type}=
 SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="00:1a:ca:ff:ff:06", ATTR{type}=="1", NAME="tmfifo_net2", RUN+="/bin/sh -c '/usr/sbin/ifup tmfifo_net2 2>/dev/null || /sbin/ip link set dev tmfifo_net2 up'"
 
 SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="00:1a:ca:ff:ff:08", ATTR{type}=="1", NAME="tmfifo_net3", RUN+="/bin/sh -c '/usr/sbin/ifup tmfifo_net3 2>/dev/null || /sbin/ip link set dev tmfifo_net3 up'"
+
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="00:1a:ca:ff:ff:0a", ATTR{type}=="1", NAME="tmfifo_net4", RUN+="/bin/sh -c '/usr/sbin/ifup tmfifo_net4 2>/dev/null || /sbin/ip link set dev tmfifo_net4 up'"
+
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="00:1a:ca:ff:ff:0c", ATTR{type}=="1", NAME="tmfifo_net5", RUN+="/bin/sh -c '/usr/sbin/ifup tmfifo_net5 2>/dev/null || /sbin/ip link set dev tmfifo_net5 up'"
+
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="00:1a:ca:ff:ff:0e", ATTR{type}=="1", NAME="tmfifo_net6", RUN+="/bin/sh -c '/usr/sbin/ifup tmfifo_net6 2>/dev/null || /sbin/ip link set dev tmfifo_net6 up'"
+
+SUBSYSTEM=="net", ACTION=="add", ATTR{address}=="00:1a:ca:ff:ff:10", ATTR{type}=="1", NAME="tmfifo_net7", RUN+="/bin/sh -c '/usr/sbin/ifup tmfifo_net7 2>/dev/null || /sbin/ip link set dev tmfifo_net7 up'"

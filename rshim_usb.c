@@ -1,17 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-only
 /*
- * rshim_usb.c - Mellanox RShim USB host driver
+ * rshim_usb.c - BlueField SoC RShim USB host driver
  *
- * Copyright 2017 Mellanox Technologies. All Rights Reserved.
- *
- *   This program is free software; you can redistribute it and/or
- *   modify it under the terms of the GNU General Public License
- *   as published by the Free Software Foundation, version 2.
- *
- *   This program is distributed in the hope that it will be useful, but
- *   WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
- *   NON INFRINGEMENT.  See the GNU General Public License for
- *   more details.
+ * Copyright (c) 2020 NVIDIA Corporation. All rights reserved.
  */
 
 /*
@@ -1057,4 +1048,4 @@ module_exit(rshim_usb_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Mellanox Technologies");
-MODULE_VERSION("0.9");
+MODULE_VERSION("0.10");

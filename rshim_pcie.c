@@ -1,17 +1,8 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0-only
 /*
- * rshim_pcie.c - Mellanox RShim PCIe host driver
+ * rshim_pcie.c - BlueField SoC RShim PCIe host driver
  *
- * Copyright 2017 Mellanox Technologies. All Rights Reserved.
- *
- *   This program is free software; you can redistribute it and/or
- *   modify it under the terms of the GNU General Public License
- *   as published by the Free Software Foundation, version 2.
- *
- *   This program is distributed in the hope that it will be useful, but
- *   WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
- *   NON INFRINGEMENT.  See the GNU General Public License for
- *   more details.
+ * Copyright (c) 2020 NVIDIA Corporation. All rights reserved.
  */
 
 #include <linux/pci.h>
@@ -458,9 +449,6 @@ static void rshim_pcie_remove(struct pci_dev *pci_dev)
 	dev->bd.has_tm = 0;
 	mutex_unlock(&dev->bd.mutex);
 
-	if (dev->rshim_regs)
-		iounmap(dev->rshim_regs);
-
 	rshim_notify(&dev->bd, RSH_EVENT_DETACH, 0);
 
 	mutex_lock(&dev->bd.mutex);
@@ -473,6 +461,9 @@ static void rshim_pcie_remove(struct pci_dev *pci_dev)
 	rshim_fifo_free(&dev->bd);
 	dev->pci_dev = NULL;
 	mutex_unlock(&dev->bd.mutex);
+
+	if (dev->rshim_regs)
+		iounmap(dev->rshim_regs);
 
 	rshim_lock();
 	kref_put(&dev->bd.kref, rshim_pcie_delete);
@@ -517,6 +508,6 @@ static void __exit rshim_pcie_exit(void)
 module_init(rshim_pcie_init);
 module_exit(rshim_pcie_exit);
 
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Mellanox Technologies");
-MODULE_VERSION("0.8");
+MODULE_VERSION("0.10");

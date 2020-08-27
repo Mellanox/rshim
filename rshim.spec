@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2017 Mellanox Technologies. All rights reserved.
+# Copyright (c) 2020 NVIDIA Corporation. All rights reserved.
 #
 # This Software is licensed under one of the following licenses:
 #
@@ -27,7 +27,7 @@
 #
 
 %{!?_name: %define _name rshim}
-%{!?_version: %define _version 1.21}
+%{!?_version: %define _version 1.24}
 %{!?_release: %define _release 0}
 
 # KMP is disabled by default

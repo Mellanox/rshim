@@ -1,16 +1,8 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0-only
 /*
- * rshim_common.c - Mellanox host-side driver for RShim
+ * rshim.c - BlueField SoC host-side driver for RShim
  *
- * Copyright 2017 Mellanox Technologies. All Rights Reserved.
- *
- *   This program is free software; you can redistribute it and/or
- *   modify it under the terms of the GNU General Public License
- *   as published by the Free Software Foundation, version 2.
- *
- *   This program is distributed in the hope that it will be useful, but
- *   WITHOUT ANY WARRANTY; without even the implied warranty of
- *   MERCHANTABILITY OR FITNESS FOR A PARTICULAR PURPOSE, GOOD TITLE or
- *   NON INFRINGEMENT.	See the GNU General Public License for more details.
+ * Copyright (c) 2020 NVIDIA Corporation. All rights reserved.
  */
 
 #include <linux/kernel.h>
@@ -393,6 +385,9 @@ static ssize_t rshim_write_delayed(struct rshim_backend *bd, int devtype,
 			mutex_unlock(&bd->mutex);
 			msleep_interruptible(1);
 			mutex_lock(&bd->mutex);
+			/* Drop and return if driver untached. */
+			if (!bd->has_rshim)
+				return count;
 			if (signal_pending(current))
 				return -ERESTARTSYS;
 		}
@@ -1869,6 +1864,11 @@ static void rshim_work_handler(struct work_struct *work)
 #endif
 	mutex_lock(&bd->mutex);
 
+	if (!bd->has_rshim) {
+		mutex_unlock(&bd->mutex);
+		return;
+	}
+
 	if (bd->keepalive && bd->has_rshim) {
 		bd->write_rshim(bd, RSHIM_CHANNEL, RSH_SCRATCHPAD1,
 				RSH_KEEPALIVE_MAGIC_NUM);
@@ -2650,7 +2650,7 @@ static ssize_t rshim_misc_write(struct file *file, const char *user_buffer,
 
 			if (!bd->has_reprobe) {
 				/* Attach. */
-				msleep_interruptible(1000);
+				msleep_interruptible(5000);
 				mutex_lock(&bd->mutex);
 				rshim_notify(bd, RSH_EVENT_ATTACH, 0);
 				mutex_unlock(&bd->mutex);
@@ -3461,6 +3461,6 @@ static void __exit rshim_exit(void)
 module_init(rshim_init);
 module_exit(rshim_exit);
 
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Mellanox Technologies");
-MODULE_VERSION("0.25");
+MODULE_VERSION("0.28");

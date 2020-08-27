@@ -1,12 +1,8 @@
+// SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0-only
 /*
  * rshim_net.c - Mellanox RShim network host driver
  *
- * Copyright (c) 2017, Mellanox Technologies. All rights reserved.
- *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version
- * 2 of the License, or (at your option) any later version.
+ * Copyright (c) 2020 NVIDIA Corporation. All rights reserved.
  */
 
 #include <linux/delay.h>
@@ -998,6 +994,6 @@ static void __exit rshim_net_exit(void)
 module_init(rshim_net_init);
 module_exit(rshim_net_exit);
 
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("Dual BSD/GPL");
 MODULE_AUTHOR("Mellanox Technologies");
-MODULE_VERSION("0.9");
+MODULE_VERSION("0.10");
